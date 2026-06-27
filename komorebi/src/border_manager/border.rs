@@ -43,6 +43,8 @@ use windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush;
 use windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP;
 use windows::Win32::Graphics::Direct2D::D2D1_GAMMA_2_2;
 use windows::Win32::Graphics::Direct2D::D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED;
 use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
 use windows_numerics::Vector2;
 use windows::Win32::Graphics::Dwm::DWM_BB_BLURREGION;
@@ -125,6 +127,48 @@ static BRUSH_PROPERTIES: LazyLock<D2D1_BRUSH_PROPERTIES> =
 ///
 /// SAFETY: caller must ensure `border_pointer` is non-null, points to a live
 /// `Border`, and that we are running on the border's WndProc thread.
+/// Generate the outline points of a superellipse ("squircle") rounded rectangle,
+/// clockwise starting at the top-left corner's left point. Straight edges fall out
+/// naturally as the straight segments between consecutive corners. `radius` is the
+/// corner extent; the superellipse exponent is fixed at n=4 (classic squircle).
+fn superellipse_rect_points(rect: &D2D_RECT_F, radius: f32) -> Vec<Vector2> {
+    const SEG: usize = 12;
+    let p = 0.5_f32; // 2 / n with n = 4
+    let frac = std::f32::consts::FRAC_PI_2;
+    let w = (rect.right - rect.left).max(0.0);
+    let h = (rect.bottom - rect.top).max(0.0);
+    let r = radius.max(0.0).min(w / 2.0).min(h / 2.0);
+    let (l, t, rr, b) = (rect.left, rect.top, rect.right, rect.bottom);
+
+    let mut pts: Vec<Vector2> = Vec::with_capacity(SEG * 4 + 4);
+    let mut arc = |cx: f32, cy: f32, fx: &dyn Fn(f32) -> f32, fy: &dyn Fn(f32) -> f32| {
+        for i in 0..=SEG {
+            let th = (i as f32 / SEG as f32) * frac;
+            pts.push(Vector2 {
+                X: cx + r * fx(th),
+                Y: cy + r * fy(th),
+            });
+        }
+    };
+
+    // cos/sin can be a tiny negative value near pi/2 (e.g. cos(pi/2) ~= -4.4e-8),
+    // and a negative base with a fractional exponent yields NaN, which produces an
+    // invalid geometry that D2D silently refuses to draw. Clamp the base to >= 0.
+    let c = |th: f32| th.cos().max(0.0).powf(p);
+    let s = |th: f32| th.sin().max(0.0).powf(p);
+
+    // top-left: left -> top
+    arc(l + r, t + r, &|th| -c(th), &|th| -s(th));
+    // top-right: top -> right
+    arc(rr - r, t + r, &|th| s(th), &|th| -c(th));
+    // bottom-right: right -> bottom
+    arc(rr - r, b - r, &|th| c(th), &|th| s(th));
+    // bottom-left: bottom -> left
+    arc(l + r, b - r, &|th| -s(th), &|th| c(th));
+
+    pts
+}
+
 /// Draw the border outline with the appropriate brush and corner style. Focused
 /// window kinds use the linear-gradient brush (endpoints fit to the window size)
 /// when one is available, otherwise the solid per-kind brush. `width_i`/`height_i`
@@ -176,7 +220,29 @@ unsafe fn draw_outline(
 
         match style {
             BorderStyle::Rounded => {
-                render_target.DrawRoundedRectangle(rounded_rect, brush, width_px, None);
+                // Draw a superellipse (squircle) outline via a custom path geometry
+                // instead of D2D's circular DrawRoundedRectangle.
+                let mut drew = false;
+                if let Ok(geometry) = RENDER_FACTORY.CreatePathGeometry()
+                    && let Ok(sink) = geometry.Open()
+                {
+                    let pts = superellipse_rect_points(&rounded_rect.rect, rounded_rect.radiusX);
+                    if pts.len() >= 2 {
+                        sink.BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
+                        for pt in &pts[1..] {
+                            sink.AddLine(*pt);
+                        }
+                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    }
+                    if sink.Close().is_ok() {
+                        render_target.DrawGeometry(&geometry, brush, width_px, None);
+                        drew = true;
+                    }
+                }
+                if !drew {
+                    // Fallback so there is always a visible border if geometry creation fails.
+                    render_target.DrawRoundedRectangle(rounded_rect, brush, width_px, None);
+                }
             }
             BorderStyle::Square => {
                 render_target.DrawRectangle(&rounded_rect.rect, brush, width_px, None);
