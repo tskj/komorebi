@@ -362,6 +362,32 @@ impl WindowManager {
             SocketMessage::CycleStackIndex(direction) => {
                 self.cycle_container_window_index_in_direction(direction)?;
             }
+            SocketMessage::CycleScrollingWidth(direction) => {
+                // Fork feature: cycle the focused container's width fraction through presets.
+                const PRESETS: [f32; 6] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 1.0];
+
+                if let Ok(container) = self.focused_container_mut() {
+                    let current = container.scrolling_width.unwrap_or(1.0 / 3.0);
+                    let idx = PRESETS
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            (**a - current).abs().total_cmp(&(**b - current).abs())
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(1);
+
+                    let len = PRESETS.len() as isize;
+                    let next = match direction {
+                        crate::core::CycleDirection::Next => (idx as isize + 1).rem_euclid(len),
+                        crate::core::CycleDirection::Previous => (idx as isize - 1).rem_euclid(len),
+                    };
+
+                    container.scrolling_width = Some(PRESETS[next as usize]);
+                }
+
+                self.update_focused_workspace(false, false)?;
+            }
             SocketMessage::FocusStackWindow(idx) => {
                 // In case you are using this command on a bar on a monitor
                 // different from the currently focused one, you'd want that

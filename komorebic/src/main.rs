@@ -165,6 +165,7 @@ gen_enum_subcommand_args! {
     Stack: OperationDirection,
     CycleStack: CycleDirection,
     CycleStackIndex: CycleDirection,
+    CycleScrollingWidth: CycleDirection,
     FlipLayout: Axis,
     ChangeLayout: DefaultLayout,
     CycleLayout: CycleDirection,
@@ -1151,6 +1152,9 @@ enum SubCommand {
     /// Cycle the index of the focused window in the focused stack in the specified cycle direction
     #[clap(arg_required_else_help = true)]
     CycleStackIndex(CycleStackIndex),
+    /// Cycle the focused window's width fraction in the Scrolling layout
+    #[clap(arg_required_else_help = true)]
+    CycleScrollingWidth(CycleScrollingWidth),
     /// Focus the specified window index in the focused stack
     #[clap(arg_required_else_help = true)]
     FocusStackWindow(FocusStackWindow),
@@ -2946,6 +2950,9 @@ if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
         }
         SubCommand::CycleStackIndex(args) => {
             send_message(&SocketMessage::CycleStackIndex(args.cycle_direction))?;
+        }
+        SubCommand::CycleScrollingWidth(args) => {
+            send_message(&SocketMessage::CycleScrollingWidth(args.cycle_direction))?;
         }
         SubCommand::ChangeLayout(args) => {
             send_message(&SocketMessage::ChangeLayout(args.default_layout))?;

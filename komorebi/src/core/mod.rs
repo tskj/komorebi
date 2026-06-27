@@ -41,6 +41,7 @@ pub use komorebi_layouts::OperationDirection;
 pub use komorebi_layouts::Rect;
 pub use komorebi_layouts::ScrollingLayoutOptions;
 pub use komorebi_layouts::Sizing;
+pub use komorebi_layouts::scrolling_arrangement;
 pub use komorebi_layouts::validate_ratios;
 
 // Local modules and exports
@@ -72,6 +73,7 @@ pub enum SocketMessage {
     UnstackWindow,
     CycleStack(CycleDirection),
     CycleStackIndex(CycleDirection),
+    CycleScrollingWidth(CycleDirection),
     FocusStackWindow(usize),
     StackAll,
     UnstackAll,

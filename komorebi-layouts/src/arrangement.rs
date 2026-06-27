@@ -1547,6 +1547,105 @@ fn calculate_ultrawide_adjustment(resize_dimensions: &[Option<Rect>]) -> Vec<Rec
     result
 }
 
+/// Fork feature: arrange the Scrolling layout with per-window fractional widths.
+///
+/// `widths[i]` is the desired fraction (0.1..=1.0) of the work area width for
+/// container `i`; `None` falls back to the default equal-column width
+/// (1 / `columns`). Containers are laid out on a horizontal strip and the
+/// viewport is scrolled so the focused container is fully visible; neighbours
+/// that don't fit are positioned partially or fully off-screen and the OS clips
+/// them against the desktop bounds.
+pub fn scrolling_arrangement(
+    area: &Rect,
+    widths: &[Option<f32>],
+    columns: usize,
+    center: bool,
+    focused_idx: usize,
+    latest_layout: &[Rect],
+) -> Vec<Rect> {
+    let len = widths.len();
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let total_w = area.right.max(1);
+    let visible = columns.min(len).max(1);
+    let default_w = total_w / visible as i32;
+
+    // Per-container pixel widths.
+    let col_w: Vec<i32> = widths
+        .iter()
+        .map(|w| match w {
+            Some(f) => (f.clamp(0.1, 1.0) * total_w as f32).round() as i32,
+            None => default_w,
+        })
+        .map(|w| w.clamp(1, total_w))
+        .collect();
+
+    // Cumulative x position of each container on the (infinite) strip.
+    let mut strip_x = vec![0i32; len];
+    let mut acc = 0i32;
+    for i in 0..len {
+        strip_x[i] = acc;
+        acc += col_w[i];
+    }
+    let total_strip = acc;
+
+    let f = focused_idx.min(len - 1);
+
+    // Previous first-visible index, derived robustly (threshold) from the last
+    // layout so the viewport doesn't jump when the focused window is already
+    // visible. Mirrors the equal-column scrolling behaviour.
+    let mut first = if latest_layout.len() == len {
+        latest_layout
+            .iter()
+            .position(|r| r.left >= area.left)
+            .unwrap_or(0)
+    } else {
+        0
+    }
+    .min(len - 1);
+
+    if center {
+        // Walk left from the focused container until we've covered ~half the
+        // viewport, so the focused column ends up centred.
+        let half = total_w / 2;
+        let mut covered = col_w[f] / 2;
+        first = f;
+        while first > 0 && covered + col_w[first - 1] <= half {
+            first -= 1;
+            covered += col_w[first];
+        }
+    } else if f < first {
+        // Focused is left of the viewport: scroll so it becomes first.
+        first = f;
+    } else {
+        // Focused is at/right of the viewport: advance `first` until the focused
+        // container fits within the viewport width.
+        while first < f {
+            let span: i32 = col_w[first..=f].iter().sum();
+            if span <= total_w {
+                break;
+            }
+            first += 1;
+        }
+    }
+
+    // Convert the chosen first-visible index to a scroll offset, then clamp so we
+    // never scroll past the strip ends (avoids empty space at the right edge).
+    let max_scroll = (total_strip - total_w).max(0);
+    let scroll = strip_x[first].clamp(0, max_scroll);
+
+    (0..len)
+        .map(|i| Rect {
+            left: area.left + strip_x[i] - scroll,
+            top: area.top,
+            right: col_w[i],
+            bottom: area.bottom,
+        })
+        .collect()
+}
+
 fn calculate_scrolling_adjustment(resize_dimensions: &[Option<Rect>]) -> Vec<Rect> {
     let len = resize_dimensions.len();
     let mut result = vec![Rect::default(); len];

@@ -14,6 +14,10 @@ pub struct Container {
     pub id: String,
     #[serde(default)]
     pub locked: bool,
+    /// Fork feature: desired width fraction (0.1..=1.0) of the work area for this
+    /// container in the Scrolling layout. `None` uses the default equal-column width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrolling_width: Option<f32>,
     windows: Ring<Window>,
 }
 
@@ -24,6 +28,7 @@ impl Default for Container {
         Self {
             id: nanoid!(),
             locked: false,
+            scrolling_width: None,
             windows: Ring::default(),
         }
     }
@@ -45,6 +50,7 @@ impl Container {
         Self {
             id: "PRESELECT".to_string(),
             locked: false,
+            scrolling_width: None,
             windows: Default::default(),
         }
     }

@@ -718,6 +718,28 @@ impl Workspace {
                     &self.latest_layout,
                 );
 
+                // Fork feature: per-window fractional widths for the Scrolling layout.
+                if matches!(self.layout, Layout::Default(DefaultLayout::Scrolling)) {
+                    let widths: Vec<Option<f32>> =
+                        self.containers().iter().map(|c| c.scrolling_width).collect();
+
+                    if widths.iter().any(Option::is_some) {
+                        let (columns, center) = effective_layout_options
+                            .and_then(|o| o.scrolling)
+                            .map(|s| (s.columns, s.center_focused_column.unwrap_or(false)))
+                            .unwrap_or((3, false));
+
+                        layouts = crate::core::scrolling_arrangement(
+                            &adjusted_work_area,
+                            &widths,
+                            columns,
+                            center,
+                            self.focused_container_idx(),
+                            &self.latest_layout,
+                        );
+                    }
+                }
+
                 let should_remove_titlebars = REMOVE_TITLEBARS.load(Ordering::SeqCst);
                 let no_titlebar = NO_TITLEBAR.lock().clone();
                 let regex_identifiers = REGEX_IDENTIFIERS.lock().clone();
