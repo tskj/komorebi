@@ -36,8 +36,15 @@ use windows::Win32::Graphics::Direct2D::D2D1_RENDER_TARGET_PROPERTIES;
 use windows::Win32::Graphics::Direct2D::D2D1_RENDER_TARGET_TYPE_DEFAULT;
 use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::Win32::Graphics::Direct2D::D2D1CreateFactory;
+use windows::Win32::Graphics::Direct2D::ID2D1Brush;
 use windows::Win32::Graphics::Direct2D::ID2D1Factory;
+use windows::Win32::Graphics::Direct2D::ID2D1LinearGradientBrush;
 use windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush;
+use windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP;
+use windows::Win32::Graphics::Direct2D::D2D1_GAMMA_2_2;
+use windows::Win32::Graphics::Direct2D::D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
+use windows_numerics::Vector2;
 use windows::Win32::Graphics::Dwm::DWM_BB_BLURREGION;
 use windows::Win32::Graphics::Dwm::DWM_BB_ENABLE;
 use windows::Win32::Graphics::Dwm::DWM_BLURBEHIND;
@@ -118,6 +125,67 @@ static BRUSH_PROPERTIES: LazyLock<D2D1_BRUSH_PROPERTIES> =
 ///
 /// SAFETY: caller must ensure `border_pointer` is non-null, points to a live
 /// `Border`, and that we are running on the border's WndProc thread.
+/// Draw the border outline with the appropriate brush and corner style. Focused
+/// window kinds use the linear-gradient brush (endpoints fit to the window size)
+/// when one is available, otherwise the solid per-kind brush. `width_i`/`height_i`
+/// are the border window's width/height in pixels.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_outline(
+    render_target: &RenderTarget,
+    rounded_rect: &D2D1_ROUNDED_RECT,
+    width_px: f32,
+    width_i: i32,
+    height_i: i32,
+    raw_style: BorderStyle,
+    window_kind: WindowKind,
+    solid: Option<&ID2D1SolidColorBrush>,
+    gradient: Option<&ID2D1LinearGradientBrush>,
+) {
+    unsafe {
+        let style = match raw_style {
+            BorderStyle::System => {
+                if *WINDOWS_11 {
+                    BorderStyle::Rounded
+                } else {
+                    BorderStyle::Square
+                }
+            }
+            other => other,
+        };
+
+        let focused = matches!(
+            window_kind,
+            WindowKind::Single | WindowKind::Stack | WindowKind::Monocle
+        );
+
+        let brush: Option<&ID2D1Brush> = if focused && let Some(g) = gradient {
+            // Fit the gradient diagonally across the window so it spans corner to corner.
+            g.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
+            g.SetEndPoint(Vector2 {
+                X: width_i as f32,
+                Y: height_i as f32,
+            });
+            Some(g.deref())
+        } else {
+            solid.map(|b| b.deref())
+        };
+
+        let Some(brush) = brush else {
+            return;
+        };
+
+        match style {
+            BorderStyle::Rounded => {
+                render_target.DrawRoundedRectangle(rounded_rect, brush, width_px, None);
+            }
+            BorderStyle::Square => {
+                render_target.DrawRectangle(&rounded_rect.rect, brush, width_px, None);
+            }
+            _ => {}
+        }
+    }
+}
+
 unsafe fn apply_tracked_rect(border_pointer: *mut Border, rect: Rect) {
     unsafe {
         let reference_hwnd = (*border_pointer).tracking_hwnd;
@@ -160,44 +228,21 @@ unsafe fn apply_tracked_rect(border_pointer: *mut Border, rect: Rect) {
         });
 
         let window_kind = (*border_pointer).window_kind;
-        let Some(brush) = (*border_pointer).brushes.get(&window_kind) else {
-            return;
-        };
 
         render_target.BeginDraw();
         render_target.Clear(None);
 
-        let style = match (*border_pointer).style {
-            BorderStyle::System => {
-                if *WINDOWS_11 {
-                    BorderStyle::Rounded
-                } else {
-                    BorderStyle::Square
-                }
-            }
-            BorderStyle::Rounded => BorderStyle::Rounded,
-            BorderStyle::Square => BorderStyle::Square,
-        };
-
-        match style {
-            BorderStyle::Rounded => {
-                render_target.DrawRoundedRectangle(
-                    &(*border_pointer).rounded_rect,
-                    brush,
-                    border_width as f32,
-                    None,
-                );
-            }
-            BorderStyle::Square => {
-                render_target.DrawRectangle(
-                    &(*border_pointer).rounded_rect.rect,
-                    brush,
-                    border_width as f32,
-                    None,
-                );
-            }
-            _ => {}
-        }
+        draw_outline(
+            render_target,
+            &(*border_pointer).rounded_rect,
+            border_width as f32,
+            rect.right,
+            rect.bottom,
+            (*border_pointer).style,
+            window_kind,
+            (*border_pointer).brushes.get(&window_kind),
+            (*border_pointer).gradient_brush.as_ref(),
+        );
 
         let _ = render_target.EndDraw(None, None);
     }
@@ -231,6 +276,8 @@ pub struct Border {
     pub brush_properties: D2D1_BRUSH_PROPERTIES,
     pub rounded_rect: D2D1_ROUNDED_RECT,
     pub brushes: HashMap<WindowKind, ID2D1SolidColorBrush>,
+    /// Optional linear-gradient brush used for focused-window borders (hyprland/yabai style).
+    pub gradient_brush: Option<ID2D1LinearGradientBrush>,
     pub is_destroying: Arc<AtomicBool>,
 }
 
@@ -250,6 +297,7 @@ impl From<isize> for Border {
             brush_properties: D2D1_BRUSH_PROPERTIES::default(),
             rounded_rect: D2D1_ROUNDED_RECT::default(),
             brushes: HashMap::new(),
+            gradient_brush: None,
             is_destroying: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -299,6 +347,7 @@ impl Border {
                 brush_properties: Default::default(),
                 rounded_rect: Default::default(),
                 brushes: HashMap::new(),
+                gradient_brush: None,
                 is_destroying: Arc::new(AtomicBool::new(false)),
             };
 
@@ -399,6 +448,44 @@ impl Border {
                     {
                         self.brushes.insert(window_kind, brush);
                     }
+                }
+
+                // Build a linear-gradient brush for focused-window borders. The
+                // endpoints are updated per-window at draw time (see draw_outline).
+                let gradient_stops = [
+                    D2D1_GRADIENT_STOP {
+                        position: 0.0,
+                        color: D2D1_COLOR_F {
+                            r: 88.0 / 255.0,
+                            g: 166.0 / 255.0,
+                            b: 255.0 / 255.0,
+                            a: 1.0,
+                        },
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 1.0,
+                        color: D2D1_COLOR_F {
+                            r: 188.0 / 255.0,
+                            g: 124.0 / 255.0,
+                            b: 255.0 / 255.0,
+                            a: 1.0,
+                        },
+                    },
+                ];
+
+                if let Ok(stops) = render_target.CreateGradientStopCollection(
+                    &gradient_stops,
+                    D2D1_GAMMA_2_2,
+                    D2D1_EXTEND_MODE_CLAMP,
+                ) && let Ok(gradient) = render_target.CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                        endPoint: Vector2 { X: 0.0, Y: 0.0 },
+                    },
+                    Some(&self.brush_properties),
+                    &stops,
+                ) {
+                    self.gradient_brush = Some(gradient);
                 }
 
                 render_target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -608,49 +695,25 @@ impl Border {
                                 height: rect.bottom as u32,
                             });
 
-                            // Get window kind and color
                             let window_kind = (*border_pointer).window_kind;
-                            if let Some(brush) = (*border_pointer).brushes.get(&window_kind) {
-                                render_target.BeginDraw();
-                                render_target.Clear(None);
+                            (*border_pointer).style = STYLE.load();
 
-                                (*border_pointer).style = STYLE.load();
+                            render_target.BeginDraw();
+                            render_target.Clear(None);
 
-                                // Calculate border radius based on style
-                                let style = match (*border_pointer).style {
-                                    BorderStyle::System => {
-                                        if *WINDOWS_11 {
-                                            BorderStyle::Rounded
-                                        } else {
-                                            BorderStyle::Square
-                                        }
-                                    }
-                                    BorderStyle::Rounded => BorderStyle::Rounded,
-                                    BorderStyle::Square => BorderStyle::Square,
-                                };
+                            draw_outline(
+                                render_target,
+                                &(*border_pointer).rounded_rect,
+                                border_width as f32,
+                                rect.right,
+                                rect.bottom,
+                                (*border_pointer).style,
+                                window_kind,
+                                (*border_pointer).brushes.get(&window_kind),
+                                (*border_pointer).gradient_brush.as_ref(),
+                            );
 
-                                match style {
-                                    BorderStyle::Rounded => {
-                                        render_target.DrawRoundedRectangle(
-                                            &(*border_pointer).rounded_rect,
-                                            brush,
-                                            border_width as f32,
-                                            None,
-                                        );
-                                    }
-                                    BorderStyle::Square => {
-                                        render_target.DrawRectangle(
-                                            &(*border_pointer).rounded_rect.rect,
-                                            brush,
-                                            border_width as f32,
-                                            None,
-                                        );
-                                    }
-                                    _ => {}
-                                }
-
-                                let _ = render_target.EndDraw(None, None);
-                            }
+                            let _ = render_target.EndDraw(None, None);
                         }
                     }
                     let _ = ValidateRect(Option::from(window), None);
