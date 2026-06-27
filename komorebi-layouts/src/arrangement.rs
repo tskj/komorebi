@@ -1557,6 +1557,7 @@ fn calculate_ultrawide_adjustment(resize_dimensions: &[Option<Rect>]) -> Vec<Rec
 /// them against the desktop bounds.
 pub fn scrolling_arrangement(
     area: &Rect,
+    container_padding: Option<i32>,
     widths: &[Option<f32>],
     columns: usize,
     center: bool,
@@ -1636,14 +1637,24 @@ pub fn scrolling_arrangement(
     let max_scroll = (total_strip - total_w).max(0);
     let scroll = strip_x[first].clamp(0, max_scroll);
 
-    (0..len)
+    let mut layouts: Vec<Rect> = (0..len)
         .map(|i| Rect {
             left: area.left + strip_x[i] - scroll,
             top: area.top,
             right: col_w[i],
             bottom: area.bottom,
         })
-        .collect()
+        .collect();
+
+    // Inset each column by container padding so the inter-window gap is driven by
+    // container_padding (consistent with the other layouts) rather than being tied
+    // to the border width.
+    let pad = container_padding.unwrap_or_default();
+    for layout in &mut layouts {
+        layout.add_padding(pad);
+    }
+
+    layouts
 }
 
 fn calculate_scrolling_adjustment(resize_dimensions: &[Option<Rect>]) -> Vec<Rect> {

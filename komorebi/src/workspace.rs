@@ -731,6 +731,7 @@ impl Workspace {
 
                         layouts = crate::core::scrolling_arrangement(
                             &adjusted_work_area,
+                            Some(container_padding),
                             &widths,
                             columns,
                             center,
