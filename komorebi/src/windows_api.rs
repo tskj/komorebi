@@ -608,6 +608,31 @@ impl WindowsApi {
         )
     }
 
+    /// Place `hwnd` directly beneath `after_hwnd` in the Z order (i.e. just behind
+    /// it). If `after_hwnd` is topmost, `hwnd` becomes topmost too, immediately
+    /// below it. Used to tuck a floating window under its own border without ever
+    /// leaving the border behind the window (which causes flicker).
+    pub fn raise_window_below(hwnd: isize, after_hwnd: isize) -> eyre::Result<()> {
+        let mut flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        if matches!(
+            WINDOW_HANDLING_BEHAVIOUR.load(),
+            WindowHandlingBehaviour::Async
+        ) {
+            flags |= SetWindowPosition::ASYNC_WINDOW_POS;
+        }
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND(as_ptr!(after_hwnd)),
+            flags.bits(),
+        )
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     pub fn lower_window(hwnd: isize) -> eyre::Result<()> {

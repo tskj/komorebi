@@ -267,11 +267,17 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
         {
             continue;
         }
-        let _ = WindowsApi::raise_window_topmost(hwnd);
         // Keep this window's own border above it (managed floating windows have
-        // one) so the border doesn't end up behind the window it surrounds.
+        // one). Order matters: raise the BORDER into the topmost band first, then
+        // tuck the window directly beneath it. Raising the window first (then the
+        // border) leaves the border behind its own window for a frame every tick,
+        // which shows up as a constant ~10Hz flicker. For unmanaged windows with
+        // no border (e.g. Calculator) just raise the window itself.
         if let Some(border_info) = window_border(hwnd) {
             let _ = WindowsApi::raise_window_topmost(border_info.border_hwnd);
+            let _ = WindowsApi::raise_window_below(hwnd, border_info.border_hwnd);
+        } else {
+            let _ = WindowsApi::raise_window_topmost(hwnd);
         }
     }
 }
