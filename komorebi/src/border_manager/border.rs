@@ -721,8 +721,19 @@ impl Border {
         // Hollow out the border window so only the stroke band is solid and the
         // centre is a click-through hole (the OS ignores HTTRANSPARENT for topmost
         // cross-process overlays, so a real hole is the only reliable way).
+        //
+        // The hole must reach the *inner edge of the visible stroke* and no
+        // further. The stroke is centred on a path inset `width/2 - offset` from
+        // the overlay edge, so its inner edge sits `width - offset` in. Using a
+        // larger band (e.g. width + 6) leaves a solid, click-eating rim several px
+        // inside the window all around: clicking it hits this topmost overlay,
+        // which the OS won't pass through, deactivating the window (greyed title
+        // bar, lost click) even though komorebi still considers it focused. Sizing
+        // the band to the stroke means clicks are only blocked where the border is
+        // actually painted.
         let radius = self.rounded_rect.radiusX as i32 + self.width;
-        WindowsApi::set_border_region(self.hwnd, rect.right, rect.bottom, radius, self.width + 6);
+        let band = (self.width - self.offset).max(1);
+        WindowsApi::set_border_region(self.hwnd, rect.right, rect.bottom, radius, band);
 
         Ok(())
     }
