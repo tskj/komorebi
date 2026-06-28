@@ -646,7 +646,9 @@ impl Border {
                 self.render_target = Some(RenderTarget(render_target));
 
                 self.rounded_rect = {
-                    let radius = 20.0 + self.width as f32 / 2.0;
+                    // Fixed corner radius (decoupled from width). With n=4 the border
+                    // stroke covers the square window corner when width >= ~0.45*radius.
+                    let radius = 22.0;
                     D2D1_ROUNDED_RECT {
                         rect: Default::default(),
                         radiusX: radius,
