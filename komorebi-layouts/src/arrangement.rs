@@ -1558,6 +1558,7 @@ fn calculate_ultrawide_adjustment(resize_dimensions: &[Option<Rect>]) -> Vec<Rec
 pub fn scrolling_arrangement(
     area: &Rect,
     container_padding: Option<i32>,
+    outer_pad: i32,
     widths: &[Option<f32>],
     columns: usize,
     center: bool,
@@ -1593,49 +1594,46 @@ pub fn scrolling_arrangement(
     let total_strip = acc;
 
     let f = focused_idx.min(len - 1);
+    let pad = container_padding.unwrap_or_default();
+    let max_scroll = (total_strip - total_w).max(0);
 
-    // Previous first-visible index, derived robustly (threshold) from the last
-    // layout so the viewport doesn't jump when the focused window is already
-    // visible. Mirrors the equal-column scrolling behaviour.
-    let mut first = if latest_layout.len() == len {
-        latest_layout
-            .iter()
-            .position(|r| r.left >= area.left)
-            .unwrap_or(0)
+    // Recover the previous scroll offset from the last layout. Container 0 always
+    // sits at strip_x 0, so its left edge gives the exact previous scroll
+    // regardless of how the columns are aligned (and it survives other columns
+    // changing width, e.g. an Alt+W resize). `pad` (container padding) and
+    // `outer_pad` (border offset + width, applied by the caller after this
+    // function) are added back because the stored layout is inset by both; if we
+    // don't account for outer_pad the derived scroll is off by that constant on
+    // every call and the strip drifts a few px per focus change.
+    let prev_scroll = if latest_layout.len() == len {
+        (area.left + pad + outer_pad - latest_layout[0].left).clamp(0, max_scroll)
     } else {
         0
-    }
-    .min(len - 1);
+    };
 
-    if center {
-        // Walk left from the focused container until we've covered ~half the
-        // viewport, so the focused column ends up centred.
-        let half = total_w / 2;
-        let mut covered = col_w[f] / 2;
-        first = f;
-        while first > 0 && covered + col_w[first - 1] <= half {
-            first -= 1;
-            covered += col_w[first];
-        }
-    } else if f < first {
-        // Focused is left of the viewport: scroll so it becomes first.
-        first = f;
+    let left_f = strip_x[f];
+    let right_f = strip_x[f] + col_w[f];
+
+    // Scroll-into-view (niri style): move the strip the *minimum* amount needed to
+    // make the focused container fully visible, rather than left-aligning a
+    // column. This keeps neighbours partially on-screen and only nudges the strip
+    // when the focused container is actually clipped.
+    let scroll = if center {
+        // Centre the focused column in the viewport.
+        left_f + col_w[f] / 2 - total_w / 2
+    } else if left_f < prev_scroll {
+        // Clipped on the left: slide right so its left edge is at the viewport.
+        left_f
+    } else if right_f > prev_scroll + total_w {
+        // Clipped on the right: slide left just enough so its right edge is at the
+        // viewport edge (so a wide left neighbour slides partially off-screen
+        // instead of the focused container jumping to the left edge).
+        right_f - total_w
     } else {
-        // Focused is at/right of the viewport: advance `first` until the focused
-        // container fits within the viewport width.
-        while first < f {
-            let span: i32 = col_w[first..=f].iter().sum();
-            if span <= total_w {
-                break;
-            }
-            first += 1;
-        }
+        // Already fully visible: don't move.
+        prev_scroll
     }
-
-    // Convert the chosen first-visible index to a scroll offset, then clamp so we
-    // never scroll past the strip ends (avoids empty space at the right edge).
-    let max_scroll = (total_strip - total_w).max(0);
-    let scroll = strip_x[first].clamp(0, max_scroll);
+    .clamp(0, max_scroll);
 
     let mut layouts: Vec<Rect> = (0..len)
         .map(|i| Rect {
@@ -1649,7 +1647,6 @@ pub fn scrolling_arrangement(
     // Inset each column by container padding so the inter-window gap is driven by
     // container_padding (consistent with the other layouts) rather than being tied
     // to the border width.
-    let pad = container_padding.unwrap_or_default();
     for layout in &mut layouts {
         layout.add_padding(pad);
     }

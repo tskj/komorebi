@@ -735,6 +735,11 @@ impl Workspace {
                         layouts = crate::core::scrolling_arrangement(
                             &adjusted_work_area,
                             Some(container_padding),
+                            // The caller insets each column by border_offset +
+                            // border_width after this returns; pass it so the
+                            // previous-scroll derivation stays exact (otherwise
+                            // the strip drifts a few px per focus change).
+                            border_offset + border_width,
                             &widths,
                             columns,
                             center,
