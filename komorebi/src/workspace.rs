@@ -1154,6 +1154,16 @@ impl Workspace {
         if container.windows().is_empty() {
             self.remove_container_by_idx(container_idx);
             self.focus_previous_container();
+            // Fork: explicitly focus the resulting container in the OS. Otherwise
+            // closing a window lets Windows pick an arbitrary next foreground
+            // window, which komorebi then follows - making the Scrolling layout
+            // jump to the far end instead of staying next to the closed window.
+            if let Some(window) = self
+                .focused_container()
+                .and_then(|c| c.focused_window().copied())
+            {
+                window.focus(false)?;
+            }
         } else {
             container.load_focused_window();
             if let Some(window) = container.focused_window() {
