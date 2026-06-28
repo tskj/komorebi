@@ -64,6 +64,7 @@ use windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
 use windows::Win32::UI::WindowsAndMessaging::GetMessageW;
 use windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+use windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT;
 use windows::Win32::UI::WindowsAndMessaging::IDC_ARROW;
 use windows::Win32::UI::WindowsAndMessaging::LoadCursorW;
 use windows::Win32::UI::WindowsAndMessaging::MSG;
@@ -75,6 +76,7 @@ use windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
 use windows::Win32::UI::WindowsAndMessaging::TranslateMessage;
 use windows::Win32::UI::WindowsAndMessaging::WM_CREATE;
 use windows::Win32::UI::WindowsAndMessaging::WM_DESTROY;
+use windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST;
 use windows::Win32::UI::WindowsAndMessaging::WM_PAINT;
 use windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR;
 use windows::Win32::UI::WindowsAndMessaging::WM_USER;
@@ -559,7 +561,7 @@ impl Border {
                 self.render_target = Some(RenderTarget(render_target));
 
                 self.rounded_rect = {
-                    let radius = 8.0 + self.width as f32 / 2.0;
+                    let radius = 20.0 + self.width as f32 / 2.0;
                     D2D1_ROUNDED_RECT {
                         rect: Default::default(),
                         radiusX: radius,
@@ -629,6 +631,12 @@ impl Border {
 
         WindowsApi::set_border_pos(self.hwnd, &rect, reference_hwnd)?;
 
+        // Hollow out the border window so only the stroke band is solid and the
+        // centre is a click-through hole (the OS ignores HTTRANSPARENT for topmost
+        // cross-process overlays, so a real hole is the only reliable way).
+        let radius = self.rounded_rect.radiusX as i32 + self.width;
+        WindowsApi::set_border_region(self.hwnd, rect.right, rect.bottom, radius, self.width + 6);
+
         Ok(())
     }
 
@@ -645,6 +653,10 @@ impl Border {
     ) -> LRESULT {
         unsafe {
             match message {
+                // Make the border click-through: returning HTTRANSPARENT tells
+                // Windows to pass the click to the window beneath, so the border
+                // (now drawn above its window) doesn't intercept mouse input.
+                WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
                 WM_SETCURSOR => match LoadCursorW(None, IDC_ARROW) {
                     Ok(cursor) => {
                         SetCursor(Some(cursor));

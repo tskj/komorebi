@@ -49,6 +49,13 @@ pub extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+/// Collect every top-level window handle into the `Vec<isize>` passed via lparam.
+pub extern "system" fn collect_hwnds(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let hwnds = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+    hwnds.push(hwnd.0 as isize);
+    true.into()
+}
+
 pub extern "system" fn alt_tab_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
 

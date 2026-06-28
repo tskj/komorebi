@@ -558,6 +558,9 @@ impl Workspace {
 
         for window in self.floating_windows() {
             window.restore();
+            // Fork: keep floating windows above the (topmost) komorebi border
+            // overlays so they are not drawn behind other windows' borders.
+            let _ = WindowsApi::raise_window_topmost(window.hwnd);
         }
 
         // Do this here to make sure that an error doesn't stop the restoration of other windows
@@ -811,6 +814,12 @@ impl Workspace {
         // had a resize adjustment before, that will have been lost
         if self.monocle_container.is_none() {
             self.resize_dimensions.resize(container_count, None);
+        }
+
+        // Fork: keep komorebi-managed floating windows in the topmost band so they
+        // sit above tiled windows and the (topmost) border overlays.
+        for window in self.floating_windows() {
+            let _ = WindowsApi::raise_window_topmost(window.hwnd);
         }
 
         Ok(())

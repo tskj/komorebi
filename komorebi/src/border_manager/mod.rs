@@ -7,6 +7,7 @@ use crate::core::BorderImplementation;
 use crate::core::BorderStyle;
 use crate::core::WindowKind;
 use crate::ring::Ring;
+use crate::window::Window;
 use crate::windows_api;
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceLayer;
@@ -184,6 +185,9 @@ fn window_kind_colour(focus_kind: WindowKind) -> u32 {
 }
 
 pub fn listen_for_notifications(wm: Arc<Mutex<WindowManager>>) {
+    // Fork: keep floating/unmanaged windows above the (topmost) border overlays.
+    keep_floating_above_borders(wm.clone());
+
     std::thread::spawn(move || {
         loop {
             match handle_notifications(wm.clone()) {
@@ -196,6 +200,80 @@ pub fn listen_for_notifications(wm: Arc<Mutex<WindowManager>>) {
             }
         }
     });
+}
+
+/// Fork feature: a lightweight ticker that re-asserts every real, visible window
+/// that komorebi is NOT tiling (managed-floating and unmanaged windows alike) into
+/// the topmost band, so it renders above the topmost border overlays and above the
+/// tiled windows. Because this is purely a z-order operation it follows dragging
+/// for free. Runs ~10x/second.
+fn keep_floating_above_borders(wm: Arc<Mutex<WindowManager>>) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            lift_floating_windows(&wm);
+        }
+    });
+}
+
+/// Re-assert every real, visible window that komorebi is NOT tiling (managed
+/// floating and unmanaged alike) into the topmost band, along with its own border,
+/// so it renders above the border overlays and tiled windows. Called both on a
+/// timer (for dragging) and immediately on focus events (to avoid a visible lag).
+pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
+    // Collect the hwnds komorebi is tiling on each monitor's focused workspace;
+    // everything else visible is treated as floating.
+    let tiled: std::collections::HashSet<isize> = {
+        let state = wm.lock();
+        let mut set = std::collections::HashSet::new();
+        for m in state.monitors.elements() {
+            if let Some(ws) = m.focused_workspace() {
+                for c in ws.containers().iter() {
+                    for w in c.windows() {
+                        set.insert(w.hwnd);
+                    }
+                }
+                if let Some(monocle) = &ws.monocle_container {
+                    for w in monocle.windows() {
+                        set.insert(w.hwnd);
+                    }
+                }
+                if let Some(maximized) = ws.maximized_window {
+                    set.insert(maximized.hwnd);
+                }
+            }
+        }
+        set
+    };
+
+    for hwnd in WindowsApi::all_hwnds() {
+        if tiled.contains(&hwnd) {
+            continue;
+        }
+        if !WindowsApi::is_window_visible(hwnd) || WindowsApi::is_iconic(hwnd) {
+            continue;
+        }
+        let window = Window::from(hwnd);
+        if !window.is_window() || window.is_cloaked().unwrap_or(true) {
+            continue;
+        }
+        if window.title().map(|t| t.is_empty()).unwrap_or(true) {
+            continue;
+        }
+        // Skip komorebi's own border overlay windows.
+        if WindowsApi::real_window_class_w(hwnd)
+            .map(|c| c.starts_with("komoborder"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let _ = WindowsApi::raise_window_topmost(hwnd);
+        // Keep this window's own border above it (managed floating windows have
+        // one) so the border doesn't end up behind the window it surrounds.
+        if let Some(border_info) = window_border(hwnd) {
+            let _ = WindowsApi::raise_window_topmost(border_info.border_hwnd);
+        }
+    }
 }
 
 pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result<()> {
@@ -665,6 +743,11 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
         previous_is_paused = is_paused;
         previous_notification = Some(notification);
         previous_layer = workspace_layer;
+
+        // Fork: immediately re-lift floating windows above the just-updated
+        // borders so a focus change doesn't leave them behind until the next
+        // ticker pass.
+        lift_floating_windows(&wm);
     }
 
     Ok(())

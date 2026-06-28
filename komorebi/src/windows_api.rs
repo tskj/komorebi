@@ -37,7 +37,15 @@ use windows::Win32::Graphics::Dwm::DwmRegisterThumbnail;
 use windows::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows::Win32::Graphics::Dwm::DwmUnregisterThumbnail;
 use windows::Win32::Graphics::Dwm::DwmUpdateThumbnailProperties;
+use windows::Win32::Graphics::Gdi::CombineRgn;
+use windows::Win32::Graphics::Gdi::CreatePolygonRgn;
+use windows::Win32::Graphics::Gdi::CreateRectRgn;
 use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+use windows::Win32::Graphics::Gdi::DeleteObject;
+use windows::Win32::Graphics::Gdi::HGDIOBJ;
+use windows::Win32::Graphics::Gdi::RGN_DIFF;
+use windows::Win32::Graphics::Gdi::SetWindowRgn;
+use windows::Win32::Graphics::Gdi::WINDING;
 use windows::Win32::Graphics::Gdi::EnumDisplayMonitors;
 use windows::Win32::Graphics::Gdi::GetMonitorInfoW;
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -103,6 +111,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::Win32::UI::WindowsAndMessaging::HDEVNOTIFY;
 use windows::Win32::UI::WindowsAndMessaging::HWND_BOTTOM;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
+use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::IsIconic;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
@@ -418,6 +427,16 @@ impl WindowsApi {
         unsafe { EnumWindows(callback, LPARAM(callback_data_address)) }.process()
     }
 
+    /// Enumerate every top-level window handle (in z-order, topmost first).
+    pub fn all_hwnds() -> Vec<isize> {
+        let mut hwnds: Vec<isize> = Vec::new();
+        let _ = Self::enum_windows(
+            Some(windows_callbacks::collect_hwnds),
+            &mut hwnds as *mut Vec<isize> as isize,
+        );
+        hwnds
+    }
+
     pub fn load_workspace_information(monitors: &mut Ring<Monitor>) -> eyre::Result<()> {
         for monitor in monitors.elements_mut() {
             let monitor_name = monitor.name.clone();
@@ -566,6 +585,29 @@ impl WindowsApi {
         )
     }
 
+    /// Raise a window into the topmost band (sticky). Used for floating windows so
+    /// they sit above komorebi's (topmost) border overlays.
+    pub fn raise_window_topmost(hwnd: isize) -> eyre::Result<()> {
+        let mut flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        if matches!(
+            WINDOW_HANDLING_BEHAVIOUR.load(),
+            WindowHandlingBehaviour::Async
+        ) {
+            flags |= SetWindowPosition::ASYNC_WINDOW_POS;
+        }
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_TOPMOST,
+            flags.bits(),
+        )
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     pub fn lower_window(hwnd: isize) -> eyre::Result<()> {
@@ -603,12 +645,94 @@ impl WindowsApi {
             flags |= SetWindowPosition::ASYNC_WINDOW_POS;
         }
 
-        Self::set_window_pos(
-            HWND(as_ptr!(hwnd)),
-            layout,
-            HWND(as_ptr!(position)),
-            flags.bits(),
-        )
+        // Draw the border above its tracked window (kept topmost) so its squircle
+        // corners are not occluded. Click-through is handled by giving the border
+        // window a hollow region (see set_border_region).
+        let _ = position;
+        Self::set_window_pos(HWND(as_ptr!(hwnd)), layout, HWND_TOP, flags.bits())
+    }
+
+    /// Clip a window to a squircle (superellipse) shape via SetWindowRgn so it
+    /// has rounded corners even on Windows 10 (which does not round window
+    /// corners natively). Best-effort: errors are ignored.
+    /// Give a border window a thin hollow squircle band region: the band (where
+    /// the stroke is drawn) is kept, the large centre becomes a literal hole so
+    /// clicks pass straight through to the window beneath. This is the only
+    /// reliable way to make an on-top overlay click-through, since the OS ignores
+    /// HTTRANSPARENT for topmost cross-process windows.
+    pub fn set_border_region(hwnd: isize, w: i32, h: i32, radius: i32, band: i32) {
+        unsafe {
+            if w <= 2 * band || h <= 2 * band {
+                return;
+            }
+
+            let outer_pts = Self::squircle_region_points(0, 0, w, h, radius);
+            let inner_pts = Self::squircle_region_points(
+                band,
+                band,
+                w - 2 * band,
+                h - 2 * band,
+                (radius - band).max(1),
+            );
+            let outer = CreatePolygonRgn(&outer_pts, WINDING);
+            let inner = CreatePolygonRgn(&inner_pts, WINDING);
+            let dest = CreateRectRgn(0, 0, 0, 0);
+
+            if outer.is_invalid() || inner.is_invalid() || dest.is_invalid() {
+                if !outer.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(outer.0));
+                }
+                if !inner.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(inner.0));
+                }
+                if !dest.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(dest.0));
+                }
+                return;
+            }
+
+            CombineRgn(Some(dest), Some(outer), Some(inner), RGN_DIFF);
+            // The window takes ownership of `dest`; free the temporary regions.
+            SetWindowRgn(HWND(as_ptr!(hwnd)), Some(dest), true);
+            let _ = DeleteObject(HGDIOBJ(outer.0));
+            let _ = DeleteObject(HGDIOBJ(inner.0));
+        }
+    }
+
+    /// Squircle (superellipse, n=4) outline points in window-local coordinates,
+    /// clockwise from the top-left corner, used to build the clipping region.
+    fn squircle_region_points(ox: i32, oy: i32, w: i32, h: i32, radius: i32) -> Vec<POINT> {
+        const SEG: i32 = 16;
+        let p = 0.5_f32; // 2 / n with n = 4
+        let frac = std::f32::consts::FRAC_PI_2;
+        let r = radius.min(w / 2).min(h / 2).max(0) as f32;
+        let l = ox as f32;
+        let t = oy as f32;
+        let right = (ox + w) as f32;
+        let bottom = (oy + h) as f32;
+        // Clamp the base to >= 0: cos/sin can be a hair negative near pi/2, and a
+        // negative base with a fractional exponent is NaN.
+        let c = |th: f32| th.cos().max(0.0).powf(p);
+        let s = |th: f32| th.sin().max(0.0).powf(p);
+        let mut pts: Vec<POINT> = Vec::with_capacity((SEG as usize + 1) * 4);
+        let mut arc = |cx: f32,
+                       cy: f32,
+                       fx: &dyn Fn(f32) -> f32,
+                       fy: &dyn Fn(f32) -> f32,
+                       pts: &mut Vec<POINT>| {
+            for i in 0..=SEG {
+                let th = (i as f32 / SEG as f32) * frac;
+                pts.push(POINT {
+                    x: (cx + r * fx(th)).round() as i32,
+                    y: (cy + r * fy(th)).round() as i32,
+                });
+            }
+        };
+        arc(l + r, t + r, &|t| -c(t), &|t| -s(t), &mut pts); // top-left
+        arc(right - r, t + r, &|t| s(t), &|t| -c(t), &mut pts); // top-right
+        arc(right - r, bottom - r, &|t| c(t), &|t| s(t), &mut pts); // bottom-right
+        arc(l + r, bottom - r, &|t| -s(t), &|t| c(t), &mut pts); // bottom-left
+        pts
     }
 
     /// set_window_pos calls SetWindowPos without any accounting for Window decorations.
@@ -1302,7 +1426,10 @@ impl WindowsApi {
     ) -> eyre::Result<isize> {
         unsafe {
             CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                // Topmost so the border reliably draws above its tracked window
+                // (the squircle overlay). WS_EX_TRANSPARENT + the hollow region make
+                // it click-through.
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
                 name,
                 name,
                 WS_POPUP | WS_SYSMENU,
