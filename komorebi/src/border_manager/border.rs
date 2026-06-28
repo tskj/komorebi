@@ -129,6 +129,106 @@ static BRUSH_PROPERTIES: LazyLock<D2D1_BRUSH_PROPERTIES> =
 ///
 /// SAFETY: caller must ensure `border_pointer` is non-null, points to a live
 /// `Border`, and that we are running on the border's WndProc thread.
+// --- OKLCH gradient generation -------------------------------------------------
+// Interpolating two near-opposite hues in sRGB (or even OKLAB) dips through low
+// chroma and looks grey in the middle. Interpolating in OKLCH (lightness + chroma
+// linear, hue along the shorter arc) keeps chroma up so the sweep stays vivid.
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn srgb_to_oklab(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let r = srgb_to_linear(r);
+    let g = srgb_to_linear(g);
+    let b = srgb_to_linear(b);
+    let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    let l_ = l.cbrt();
+    let m_ = m.cbrt();
+    let s_ = s.cbrt();
+    (
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    )
+}
+
+fn oklab_to_srgb(l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+    let l3 = l_ * l_ * l_;
+    let m3 = m_ * m_ * m_;
+    let s3 = s_ * s_ * s_;
+    (
+        linear_to_srgb(4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3),
+        linear_to_srgb(-1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3),
+        linear_to_srgb(-0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3),
+    )
+}
+
+/// Gradient stops interpolating two sRGB colours through OKLCH, `n` stops total.
+fn oklch_gradient_stops(c0: (f32, f32, f32), c1: (f32, f32, f32), n: usize) -> Vec<D2D1_GRADIENT_STOP> {
+    let (l0, a0, b0) = srgb_to_oklab(c0.0, c0.1, c0.2);
+    let (l1, a1, b1) = srgb_to_oklab(c1.0, c1.1, c1.2);
+    let chroma0 = (a0 * a0 + b0 * b0).sqrt();
+    let chroma1 = (a1 * a1 + b1 * b1).sqrt();
+    let h0 = b0.atan2(a0);
+    let pi = std::f32::consts::PI;
+    let mut dh = b1.atan2(a1) - h0;
+    while dh > pi {
+        dh -= 2.0 * pi;
+    }
+    while dh < -pi {
+        dh += 2.0 * pi;
+    }
+    // Take the longer arc around the hue wheel so the green-yellow -> purple sweep
+    // goes through the warm side (yellow/orange/red/magenta) instead of cyan/blue.
+    if dh > 0.0 {
+        dh -= 2.0 * pi;
+    } else {
+        dh += 2.0 * pi;
+    }
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let l = l0 + (l1 - l0) * t;
+            let h = h0 + dh * t;
+            let mut chroma = chroma0 + (chroma1 - chroma0) * t;
+            // De-emphasise orange (~60deg hue): lower its chroma so the warm sweep
+            // gives more visual room to the yellows / reds / magentas.
+            let h_deg = h.to_degrees().rem_euclid(360.0);
+            let od = {
+                let d = (h_deg - 60.0).abs();
+                d.min(360.0 - d)
+            };
+            if od < 35.0 {
+                chroma *= 0.55 + 0.45 * (od / 35.0);
+            }
+            let (r, g, b) = oklab_to_srgb(l, chroma * h.cos(), chroma * h.sin());
+            D2D1_GRADIENT_STOP {
+                position: t,
+                color: D2D1_COLOR_F { r, g, b, a: 1.0 },
+            }
+        })
+        .collect()
+}
+
 /// Generate the outline points of a superellipse ("squircle") rounded rectangle,
 /// clockwise starting at the top-left corner's left point. Straight edges fall out
 /// naturally as the straight segments between consecutive corners. `radius` is the
@@ -520,26 +620,11 @@ impl Border {
 
                 // Build a linear-gradient brush for focused-window borders. The
                 // endpoints are updated per-window at draw time (see draw_outline).
-                let gradient_stops = [
-                    D2D1_GRADIENT_STOP {
-                        position: 0.0,
-                        color: D2D1_COLOR_F {
-                            r: 88.0 / 255.0,
-                            g: 166.0 / 255.0,
-                            b: 255.0 / 255.0,
-                            a: 1.0,
-                        },
-                    },
-                    D2D1_GRADIENT_STOP {
-                        position: 1.0,
-                        color: D2D1_COLOR_F {
-                            r: 188.0 / 255.0,
-                            g: 124.0 / 255.0,
-                            b: 255.0 / 255.0,
-                            a: 1.0,
-                        },
-                    },
-                ];
+                let gradient_stops = oklch_gradient_stops(
+                    (200.0 / 255.0, 233.0 / 255.0, 150.0 / 255.0), // pale green-yellow (top-left)
+                    (188.0 / 255.0, 124.0 / 255.0, 255.0 / 255.0), // purple (bottom-right)
+                    11,
+                );
 
                 if let Ok(stops) = render_target.CreateGradientStopCollection(
                     &gradient_stops,
