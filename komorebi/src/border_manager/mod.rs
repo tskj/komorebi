@@ -491,6 +491,19 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             continue 'monitors;
                         }
 
+                        // Fork: a tiled border is topmost, so on a focus change it
+                        // can flash above a floating window for a frame before the
+                        // re-lift drops it back. If this workspace has a floating
+                        // window, position tiled borders just BELOW it (still above
+                        // their own tiled window) so there's no frame to lose. 0 =
+                        // top of the topmost band (no floating window present).
+                        let floating_ref = ws
+                            .floating_windows()
+                            .iter()
+                            .next()
+                            .map(|w| w.hwnd)
+                            .unwrap_or(0);
+
                         // Handle the monocle container separately
                         if let Some(monocle) = &ws.monocle_container {
                             let mut new_border = false;
@@ -544,6 +557,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             let rect = WindowsApi::window_rect(focused_window_hwnd)?;
                             border.window_rect = rect;
 
+                            border.below_hwnd.store(floating_ref, Ordering::Relaxed);
                             if new_border {
                                 border.set_position(&rect, focused_window_hwnd)?;
                             } else if matches!(notification, Notification::ForceUpdate) {
@@ -707,6 +721,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                                 }
                             };
                             border.window_rect = rect;
+                            border.below_hwnd.store(floating_ref, Ordering::Relaxed);
 
                             let should_invalidate = new_border
                                 || (last_focus_state != new_focus_state)
@@ -800,6 +815,9 @@ fn handle_floating_borders(
 
         let rect = WindowsApi::window_rect(window.hwnd)?;
         border.window_rect = rect;
+        // Floating-window borders stay at the top of the topmost band (above tiled
+        // borders); they are never positioned beneath another window.
+        border.below_hwnd.store(0, Ordering::Relaxed);
 
         let should_invalidate =
             new_border || (last_focus_state != new_focus_state) || layer_changed || forced_update;

@@ -657,7 +657,11 @@ impl WindowsApi {
         )
     }
 
-    pub fn set_border_pos(hwnd: isize, layout: &Rect, position: isize) -> eyre::Result<()> {
+    pub fn set_border_pos(
+        hwnd: isize,
+        layout: &Rect,
+        insert_after: Option<isize>,
+    ) -> eyre::Result<()> {
         let mut flags = SetWindowPosition::NO_SEND_CHANGING
             | SetWindowPosition::NO_ACTIVATE
             | SetWindowPosition::NO_REDRAW
@@ -670,11 +674,17 @@ impl WindowsApi {
             flags |= SetWindowPosition::ASYNC_WINDOW_POS;
         }
 
-        // Draw the border above its tracked window (kept topmost) so its squircle
-        // corners are not occluded. Click-through is handled by giving the border
-        // window a hollow region (see set_border_region).
-        let _ = position;
-        Self::set_window_pos(HWND(as_ptr!(hwnd)), layout, HWND_TOP, flags.bits())
+        // The border is kept topmost so its squircle corners are not occluded
+        // (click-through is handled by the hollow region, see set_border_region).
+        // `insert_after`, when set, places the border just below that window (a
+        // floating window) within the topmost band, so a tiled window's border
+        // doesn't flash above a floating window on focus changes; it still stays
+        // above its own (non-topmost) tiled window. None -> top of the band.
+        let position = match insert_after {
+            Some(after) => HWND(as_ptr!(after)),
+            None => HWND_TOP,
+        };
+        Self::set_window_pos(HWND(as_ptr!(hwnd)), layout, position, flags.bits())
     }
 
     /// Clip a window to a squircle (superellipse) shape via SetWindowRgn so it

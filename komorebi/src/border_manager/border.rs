@@ -14,6 +14,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicIsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use windows::Win32::Foundation::FALSE;
@@ -447,6 +448,13 @@ pub struct Border {
     /// Optional linear-gradient brush used for focused-window borders (hyprland/yabai style).
     pub gradient_brush: Option<ID2D1LinearGradientBrush>,
     pub is_destroying: Arc<AtomicBool>,
+    /// Z-order target: if non-zero, this border is positioned just BELOW the given
+    /// window (a floating window) instead of at the top of the topmost band. Keeps
+    /// a tiled window's (topmost) border from flashing over a floating window on
+    /// focus changes, while still sitting above its own tiled window. Set by the
+    /// border manager each cycle; read by every set_position (manager- or self-
+    /// driven). 0 means "raise to the top" (HWND_TOP), the default.
+    pub below_hwnd: Arc<AtomicIsize>,
 }
 
 impl From<isize> for Border {
@@ -467,6 +475,7 @@ impl From<isize> for Border {
             brushes: HashMap::new(),
             gradient_brush: None,
             is_destroying: Arc::new(AtomicBool::new(false)),
+            below_hwnd: Arc::new(AtomicIsize::new(0)),
         }
     }
 }
@@ -517,6 +526,7 @@ impl Border {
                 brushes: HashMap::new(),
                 gradient_brush: None,
                 is_destroying: Arc::new(AtomicBool::new(false)),
+                below_hwnd: Arc::new(AtomicIsize::new(0)),
             };
 
             let border_pointer = &raw mut border;
@@ -716,7 +726,15 @@ impl Border {
         rect.add_margin(self.width);
         rect.add_padding(-self.offset);
 
-        WindowsApi::set_border_pos(self.hwnd, &rect, reference_hwnd)?;
+        let _ = reference_hwnd;
+        // Position just below the tracked floating window if the manager set one
+        // (so a tiled border never flashes above a float on focus change),
+        // otherwise raise to the top of the topmost band.
+        let below = match self.below_hwnd.load(Ordering::Relaxed) {
+            0 => None,
+            hwnd => Some(hwnd),
+        };
+        WindowsApi::set_border_pos(self.hwnd, &rect, below)?;
 
         // Hollow out the border window so only the stroke band is solid and the
         // centre is a click-through hole (the OS ignores HTTRANSPARENT for topmost
