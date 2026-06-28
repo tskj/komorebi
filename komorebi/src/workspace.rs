@@ -798,6 +798,13 @@ impl Workspace {
                 let no_titlebar = NO_TITLEBAR.lock().clone();
                 let regex_identifiers = REGEX_IDENTIFIERS.lock().clone();
 
+                // Fork: in the Scrolling layout, move all windows atomically
+                // (DeferWindowPos) so a scroll doesn't briefly expose the desktop
+                // between per-window SetWindowPos calls. Collect target rects here
+                // and batch them after the loop instead of positioning each window.
+                let is_scrolling = matches!(self.layout, Layout::Default(DefaultLayout::Scrolling));
+                let mut deferred: Vec<(isize, Rect)> = Vec::new();
+
                 let containers = self.containers_mut();
 
                 for (i, container) in containers.iter_mut().enumerate() {
@@ -842,9 +849,17 @@ impl Workspace {
                                     WindowsApi::restore_window(window.hwnd);
                                 }
                             }
-                            window.set_position(layout, false)?;
+                            if is_scrolling {
+                                deferred.push((window.hwnd, *layout));
+                            } else {
+                                window.set_position(layout, false)?;
+                            }
                         }
                     }
+                }
+
+                if is_scrolling && !deferred.is_empty() {
+                    WindowsApi::defer_position_windows(&deferred)?;
                 }
 
                 self.latest_layout = layouts;

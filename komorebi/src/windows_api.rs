@@ -141,6 +141,9 @@ use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW;
 use windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_ACTION;
+use windows::Win32::UI::WindowsAndMessaging::BeginDeferWindowPos;
+use windows::Win32::UI::WindowsAndMessaging::DeferWindowPos;
+use windows::Win32::UI::WindowsAndMessaging::EndDeferWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -556,6 +559,65 @@ impl WindowsApi {
         // TOPMOST all of its owned windows are also made TOPMOST.
         // See https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos#remarks
         Self::set_window_pos(hwnd, &rect, HWND_TOP, flags.bits())
+    }
+
+    /// Position many windows in a single atomic batch via DeferWindowPos so the
+    /// compositor applies them all in one frame. Used by the Scrolling layout: when
+    /// the strip scrolls, moving each window with its own SetWindowPos leaves a
+    /// frame where one window has vacated its slot but the next hasn't filled it
+    /// yet, briefly exposing the desktop. Each window keeps its existing Z order
+    /// (NO_Z_ORDER); positions include the per-window shadow-frame compensation, as
+    /// `position_window` does. Falls back to individual positioning if the batch
+    /// can't be built.
+    pub fn defer_position_windows(positions: &[(isize, Rect)]) -> eyre::Result<()> {
+        if positions.is_empty() {
+            return Ok(());
+        }
+
+        let flags = (SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::NO_SEND_CHANGING
+            | SetWindowPosition::NO_COPY_BITS
+            | SetWindowPosition::FRAME_CHANGED
+            | SetWindowPosition::NO_Z_ORDER)
+            .bits();
+
+        unsafe {
+            if let Ok(mut hdwp) = BeginDeferWindowPos(positions.len() as i32) {
+                let mut ok = true;
+                for (hwnd, layout) in positions {
+                    let handle = HWND(as_ptr!(*hwnd));
+                    let shadow = Self::shadow_rect(handle).unwrap_or_default();
+                    match DeferWindowPos(
+                        hdwp,
+                        handle,
+                        None,
+                        layout.left + shadow.left,
+                        layout.top + shadow.top,
+                        layout.right + shadow.right,
+                        layout.bottom + shadow.bottom,
+                        SET_WINDOW_POS_FLAGS(flags),
+                    ) {
+                        Ok(next) => hdwp = next,
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+
+                if ok {
+                    let _ = EndDeferWindowPos(hdwp);
+                    return Ok(());
+                }
+            }
+        }
+
+        // Fallback: the batch couldn't be built; position each window individually.
+        for (hwnd, layout) in positions {
+            let _ = Self::position_window(*hwnd, layout, false, true);
+        }
+
+        Ok(())
     }
 
     pub fn bring_window_to_top(hwnd: isize) -> eyre::Result<()> {
