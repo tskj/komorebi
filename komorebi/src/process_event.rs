@@ -834,6 +834,19 @@ impl WindowManager {
                                 }
                             }
                         }
+                    } else if matches!(
+                        self.focused_workspace()?.layout,
+                        Layout::Default(DefaultLayout::Scrolling)
+                    ) {
+                        // Fork: in the Scrolling layout a mouse-drag resize sets the
+                        // focused column's continuous scrolling width (the same field
+                        // Alt+W cycles), rather than the pixel-delta resize path which
+                        // this layout doesn't use.
+                        tracing::info!("resizing scrolling column with mouse");
+                        let new_window_width = new_position.right;
+                        self.focused_workspace_mut()?
+                            .set_focused_scrolling_width_from_drag(new_window_width);
+                        self.update_focused_workspace(false, false)?;
                     } else {
                         tracing::info!("resizing with mouse");
                         let mut ops = vec![];

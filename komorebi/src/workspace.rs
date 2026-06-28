@@ -376,6 +376,51 @@ impl Workspace {
         resolve_threshold_match(effective_rules, container_count).or(effective_base)
     }
 
+    /// Fork: set the focused container's Scrolling-layout width from a mouse-drag
+    /// resize. Converts the dragged window pixel width into a continuous fraction
+    /// (the same `scrolling_width` field Alt+W cycles, but free-form, not snapped
+    /// to presets), so dragging a column edge fine-tunes its width instead of
+    /// going through the pixel-delta resize path the Scrolling layout ignores.
+    pub fn set_focused_scrolling_width_from_drag(&mut self, new_window_width: i32) {
+        let columns = self
+            .effective_layout_options()
+            .and_then(|o| o.scrolling)
+            .map(|s| s.columns)
+            .unwrap_or(3)
+            .max(1);
+
+        let idx = self.focused_container_idx();
+        let old_window_width = self.latest_layout.get(idx).map(|r| r.right).unwrap_or(0);
+
+        let container_padding = self
+            .container_padding
+            .or(self.globals.container_padding)
+            .unwrap_or_default();
+        // A column's strip width becomes a window width by insetting container
+        // padding (both sides) plus the border offset+width the caller applies.
+        let inset = 2 * (container_padding + self.globals.border_offset + self.globals.border_width);
+
+        if old_window_width + inset <= 0 {
+            return;
+        }
+
+        // col_w = fraction * total_w and window_width = col_w - inset, so total_w
+        // cancels out: new_fraction = old_fraction * (new + inset) / (old + inset).
+        // Fall back to the effective default fraction if the column isn't sized yet.
+        let old_fraction = self
+            .focused_container()
+            .and_then(|c| c.scrolling_width)
+            .unwrap_or(1.0 / columns as f32);
+
+        let new_fraction = (old_fraction * (new_window_width + inset) as f32
+            / (old_window_width + inset) as f32)
+            .clamp(0.1, 1.0);
+
+        if let Some(container) = self.focused_container_mut() {
+            container.scrolling_width = Some(new_fraction);
+        }
+    }
+
     pub fn hide(&mut self, omit: Option<isize>) {
         for window in self.floating_windows_mut().iter_mut().rev() {
             let mut should_hide = omit.is_none();
