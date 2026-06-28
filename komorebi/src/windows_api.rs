@@ -110,6 +110,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::Win32::UI::WindowsAndMessaging::HDEVNOTIFY;
 use windows::Win32::UI::WindowsAndMessaging::HWND_BOTTOM;
+use windows::Win32::UI::WindowsAndMessaging::HWND_NOTOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::IsIconic;
@@ -629,6 +630,37 @@ impl WindowsApi {
             HWND(as_ptr!(hwnd)),
             &Rect::default(),
             HWND(as_ptr!(after_hwnd)),
+            flags.bits(),
+        )
+    }
+
+    /// Remove the topmost flag from a window if it has one, dropping it to the top
+    /// of the non-topmost band. No-op when the window isn't topmost, so it's cheap
+    /// to call repeatedly. Used to enforce that tiled windows are never topmost
+    /// (otherwise a stuck-topmost tiled window flashes above floating windows when
+    /// focused).
+    pub fn make_non_topmost(hwnd: isize) -> eyre::Result<()> {
+        let ex = Self::gwl_ex_style(hwnd).unwrap_or(0);
+        if ex & (WS_EX_TOPMOST.0 as isize) == 0 {
+            return Ok(());
+        }
+
+        let mut flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        if matches!(
+            WINDOW_HANDLING_BEHAVIOUR.load(),
+            WindowHandlingBehaviour::Async
+        ) {
+            flags |= SetWindowPosition::ASYNC_WINDOW_POS;
+        }
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_NOTOPMOST,
             flags.bits(),
         )
     }

@@ -246,6 +246,15 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
         set
     };
 
+    // Fork: enforce the invariant that tiled windows are NOT topmost. The pass
+    // below raises floating/unmanaged windows into the topmost band; nothing else
+    // removes topmost from a window once it becomes tiled, so a window can stay
+    // stuck topmost and, when focused, jump above a floating window for a frame.
+    // make_non_topmost is a no-op for windows that are already non-topmost.
+    for hwnd in &tiled {
+        let _ = WindowsApi::make_non_topmost(*hwnd);
+    }
+
     for hwnd in WindowsApi::all_hwnds() {
         if tiled.contains(&hwnd) {
             continue;

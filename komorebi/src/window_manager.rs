@@ -1173,6 +1173,24 @@ impl WindowManager {
             }
         }
 
+        // Fork: focusing a window above activates it, raising it to the top of the
+        // non-topmost band. If a (topmost) floating window was covering it, the
+        // just-activated window's content can composite over the float for one
+        // frame before the border thread's re-lift catches up. Re-assert the
+        // workspace's floating windows on top here, synchronously, right after the
+        // activation. Mirror the lift order (border first, then tuck the window
+        // beneath it) so a float's own border doesn't fall behind it.
+        if let Ok(workspace) = self.focused_workspace() {
+            for window in workspace.floating_windows() {
+                if let Some(border_info) = crate::border_manager::window_border(window.hwnd) {
+                    let _ = WindowsApi::raise_window_topmost(border_info.border_hwnd);
+                    let _ = WindowsApi::raise_window_below(window.hwnd, border_info.border_hwnd);
+                } else {
+                    let _ = WindowsApi::raise_window_topmost(window.hwnd);
+                }
+            }
+        }
+
         Ok(())
     }
 
