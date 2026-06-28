@@ -634,6 +634,35 @@ impl WindowsApi {
         )
     }
 
+    /// One-time "kick" to wake a window's render surface: briefly resize it
+    /// smaller and back with a real (repainting) resize. Some apps (notably
+    /// Electron/Chromium ones like Slack) don't reconfigure their GPU surface in
+    /// response to komorebi's SetWindowPos resizes, so when later grown they leave
+    /// a blank strip on the right; a genuine resize wakes the surface and it
+    /// tracks correctly afterwards. Runs on a short-lived thread so it doesn't
+    /// block, after a small delay to let the freshly-managed window settle. Apps
+    /// that already track resizes are unaffected; some (Qt/wgpu) ignore it.
+    pub fn nudge_window_surface(hwnd: isize) {
+        std::thread::spawn(move || unsafe {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            let handle = HWND(as_ptr!(hwnd));
+            let mut r = RECT::default();
+            if GetWindowRect(handle, &mut r).is_err() {
+                return;
+            }
+            let w = r.right - r.left;
+            let h = r.bottom - r.top;
+            // Need a meaningful delta to trigger a reconfigure; bail on tiny windows.
+            if w <= 200 || h <= 0 {
+                return;
+            }
+            let shrunk = w - (w / 4).max(80);
+            let _ = MoveWindow(handle, r.left, r.top, shrunk, h, true);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = MoveWindow(handle, r.left, r.top, w, h, true);
+        });
+    }
+
     /// Remove the topmost flag from a window if it has one, dropping it to the top
     /// of the non-topmost band. No-op when the window isn't topmost, so it's cheap
     /// to call repeatedly. Used to enforce that tiled windows are never topmost

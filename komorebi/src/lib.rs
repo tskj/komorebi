@@ -185,6 +185,17 @@ lazy_static! {
             matching_strategy: Option::from(MatchingStrategy::Equals),
         }),
     ]));
+    // Fork: apps whose render surface doesn't reconfigure on komorebi's resizes
+    // (Electron/Chromium ones like Slack), so they show a blank strip when grown.
+    // These get a one-time resize "kick" on manage to wake the surface. Add an
+    // entry here (by exe / class / title) for any other app that needs it.
+    static ref SURFACE_NUDGE_IDENTIFIERS: Arc<Mutex<Vec<MatchingRule>>> = Arc::new(Mutex::new(vec![
+        MatchingRule::Simple(IdWithIdentifier {
+            kind: ApplicationIdentifier::Exe,
+            id: String::from("slack.exe"),
+            matching_strategy: Option::from(MatchingStrategy::Equals),
+        }),
+    ]));
     static ref DUPLICATE_MONITOR_SERIAL_IDS: Arc<RwLock<Vec<String>>> =
         Arc::new(RwLock::new(Vec::new()));
     static ref SUBSCRIPTION_PIPES: Arc<Mutex<HashMap<String, File>>> =

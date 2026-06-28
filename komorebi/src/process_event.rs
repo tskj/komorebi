@@ -20,6 +20,7 @@ use crate::Layout;
 use crate::Notification;
 use crate::NotificationEvent;
 use crate::REGEX_IDENTIFIERS;
+use crate::SURFACE_NUDGE_IDENTIFIERS;
 use crate::TRAY_AND_MULTI_WINDOW_IDENTIFIERS;
 use crate::VirtualDesktopNotification;
 use crate::Window;
@@ -586,6 +587,29 @@ impl WindowManager {
                                 // and we will be focusing the desktop on the `FocusChange` event since
                                 // it is still empty.
                                 window.focus(self.mouse_follows_focus)?;
+                            }
+
+                            // Fork: some apps (Electron/Chromium, e.g. Slack) don't
+                            // reconfigure their GPU surface on komorebi's resizes and
+                            // show a blank strip when grown. Give *only* those apps a
+                            // one-time resize "kick" on manage to wake the surface
+                            // (see SURFACE_NUDGE_IDENTIFIERS), so other windows don't
+                            // visibly twitch on open.
+                            let nudge_identifiers = SURFACE_NUDGE_IDENTIFIERS.lock();
+                            if !nudge_identifiers.is_empty()
+                                && let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                                    (window.title(), window.exe(), window.class(), window.path())
+                                && should_act(
+                                    &title,
+                                    &exe_name,
+                                    &class,
+                                    &path,
+                                    &nudge_identifiers,
+                                    &REGEX_IDENTIFIERS.lock(),
+                                )
+                                .is_some()
+                            {
+                                WindowsApi::nudge_window_surface(window.hwnd);
                             }
                         }
 
