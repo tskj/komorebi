@@ -814,7 +814,13 @@ impl Workspace {
                         layout.add_padding(border_offset);
                         layout.add_padding(border_width);
 
-                        if stackbar_manager::should_have_stackbar(window_count) {
+                        // Fork: in the Scrolling layout a container holding more than
+                        // one window is split VERTICALLY into equal boxes (niri-style)
+                        // with the usual container_padding gap, instead of being a
+                        // tabbed stack. Single-window containers are unaffected.
+                        let scrolling_split = is_scrolling && window_count > 1;
+
+                        if !scrolling_split && stackbar_manager::should_have_stackbar(window_count) {
                             let tab_height = STACKBAR_TAB_HEIGHT.load(Ordering::SeqCst);
                             let total_height = tab_height + container_padding;
 
@@ -822,7 +828,12 @@ impl Workspace {
                             layout.bottom -= total_height;
                         }
 
-                        for window in container.windows() {
+                        let slot_count = window_count.max(1) as i32;
+                        let slot_gap = container_padding;
+                        let slot_height =
+                            ((layout.bottom - slot_gap * (slot_count - 1)) / slot_count).max(1);
+
+                        for (slot_idx, window) in container.windows().iter().enumerate() {
                             if container
                                 .focused_window()
                                 .is_some_and(|w| w.hwnd == window.hwnd)
@@ -849,10 +860,17 @@ impl Workspace {
                                     WindowsApi::restore_window(window.hwnd);
                                 }
                             }
+
+                            let mut target = *layout;
+                            if scrolling_split {
+                                target.top = layout.top + (slot_height + slot_gap) * slot_idx as i32;
+                                target.bottom = slot_height;
+                            }
+
                             if is_scrolling {
-                                deferred.push((window.hwnd, *layout));
+                                deferred.push((window.hwnd, target));
                             } else {
-                                window.set_position(layout, false)?;
+                                window.set_position(&target, false)?;
                             }
                         }
                     }
