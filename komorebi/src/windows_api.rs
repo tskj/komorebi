@@ -157,6 +157,7 @@ use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
 use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
 use windows::Win32::UI::WindowsAndMessaging::WNDCLASSW;
 use windows::Win32::UI::WindowsAndMessaging::WNDENUMPROC;
+use windows::Win32::UI::WindowsAndMessaging::WS_CAPTION;
 use windows::Win32::UI::WindowsAndMessaging::WS_DISABLED;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
@@ -164,6 +165,7 @@ use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT;
 use windows::Win32::UI::WindowsAndMessaging::WS_POPUP;
 use windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU;
+use windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use windows::core::PCWSTR;
 use windows::core::PWSTR;
@@ -762,6 +764,15 @@ impl WindowsApi {
     /// window while it is the foreground window; otherwise tabbing away from it
     /// would be impossible (it would keep re-raising itself over everything).
     pub fn is_fullscreen(hwnd: isize) -> bool {
+        // A borderless-fullscreen app has neither a caption nor a sizing frame; a
+        // merely maximized window keeps both. Without this check, an auto-hidden
+        // taskbar (work area == monitor bounds) makes every maximized window test
+        // as fullscreen.
+        let style = Self::gwl_style(hwnd).unwrap_or(0);
+        if style & ((WS_CAPTION.0 | WS_THICKFRAME.0) as isize) != 0 {
+            return false;
+        }
+
         unsafe {
             let h = HWND(as_ptr!(hwnd));
             let hmonitor = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);

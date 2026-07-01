@@ -257,6 +257,30 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
 
     let foreground = WindowsApi::foreground_window().unwrap_or_default();
 
+    // Fork: context for the fullscreen-demote branch below. Demotion needs
+    // reliable focus info: skip it when the foreground query failed, or when the
+    // foreground is the alt-tab/task-view overlay itself — demoting a game
+    // mid-alt-tab flashes the desktop behind it and flaps if the switch is
+    // cancelled back into the game.
+    let switcher_is_foreground = foreground != 0
+        && WindowsApi::real_window_class_w(foreground)
+            .map(|c| {
+                matches!(
+                    c.as_str(),
+                    "MultitaskingViewFrame"
+                        | "XamlExplorerHostIslandWindow"
+                        | "TaskSwitcherWnd"
+                        | "ForegroundStaging"
+                )
+            })
+            .unwrap_or(false);
+    let demote_fullscreen = foreground != 0 && !switcher_is_foreground;
+    let foreground_monitor = if demote_fullscreen {
+        WindowsApi::monitor_from_window(foreground)
+    } else {
+        0
+    };
+
     for hwnd in WindowsApi::all_hwnds() {
         if tiled.contains(&hwnd) {
             continue;
@@ -279,11 +303,16 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
             continue;
         }
         // Fork: a fullscreen window (e.g. a game) should only be pinned on top
-        // while it IS the foreground window. When it's not focused, drop it out of
-        // the topmost band so it falls behind and you can tab back to the managed
-        // desktop — otherwise the always-on-top lift traps focus on it.
+        // while it IS the foreground window. When focus moves to something on the
+        // SAME monitor, drop it out of the topmost band so it falls behind and you
+        // land back in the managed desktop — otherwise the always-on-top lift
+        // traps focus on it. Focus on a DIFFERENT monitor leaves its z-state
+        // alone, so a fullscreen video/game keeps playing above that monitor's
+        // tiles and borders while you work elsewhere.
         if hwnd != foreground && WindowsApi::is_fullscreen(hwnd) {
-            let _ = WindowsApi::make_non_topmost(hwnd);
+            if demote_fullscreen && WindowsApi::monitor_from_window(hwnd) == foreground_monitor {
+                let _ = WindowsApi::make_non_topmost(hwnd);
+            }
             continue;
         }
         // Keep this window's own border above it (managed floating windows have
