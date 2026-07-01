@@ -756,6 +756,32 @@ impl WindowsApi {
         )
     }
 
+    /// True if the window covers the full bounds of the monitor it is on (a
+    /// borderless/exclusive fullscreen app, e.g. a game — not merely maximized to
+    /// the work area). Used so the always-on-top lift only pins a fullscreen
+    /// window while it is the foreground window; otherwise tabbing away from it
+    /// would be impossible (it would keep re-raising itself over everything).
+    pub fn is_fullscreen(hwnd: isize) -> bool {
+        unsafe {
+            let h = HWND(as_ptr!(hwnd));
+            let hmonitor = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+            if hmonitor.is_invalid() {
+                return false;
+            }
+            let mut mi = MONITORINFOEXW::default();
+            mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if !GetMonitorInfoW(hmonitor, &mut mi.monitorInfo).as_bool() {
+                return false;
+            }
+            let mut wr = RECT::default();
+            if GetWindowRect(h, &mut wr).is_err() {
+                return false;
+            }
+            let m = mi.monitorInfo.rcMonitor;
+            wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom
+        }
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     pub fn lower_window(hwnd: isize) -> eyre::Result<()> {

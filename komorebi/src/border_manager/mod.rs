@@ -255,6 +255,8 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
         let _ = WindowsApi::make_non_topmost(*hwnd);
     }
 
+    let foreground = WindowsApi::foreground_window().unwrap_or_default();
+
     for hwnd in WindowsApi::all_hwnds() {
         if tiled.contains(&hwnd) {
             continue;
@@ -274,6 +276,14 @@ pub fn lift_floating_windows(wm: &Arc<Mutex<WindowManager>>) {
             .map(|c| c.starts_with("komoborder"))
             .unwrap_or(false)
         {
+            continue;
+        }
+        // Fork: a fullscreen window (e.g. a game) should only be pinned on top
+        // while it IS the foreground window. When it's not focused, drop it out of
+        // the topmost band so it falls behind and you can tab back to the managed
+        // desktop — otherwise the always-on-top lift traps focus on it.
+        if hwnd != foreground && WindowsApi::is_fullscreen(hwnd) {
+            let _ = WindowsApi::make_non_topmost(hwnd);
             continue;
         }
         // Keep this window's own border above it (managed floating windows have
